@@ -16,8 +16,8 @@ class BookingController extends Controller
 
     public function __construct(
         BoardingHouseRepositoryInterface $boardingHouseRepository, 
-        TransactionRepositoryInterface $transactionRepository)
-    {
+        TransactionRepositoryInterface $transactionRepository
+    ) {
         $this->boardingHouseRepository = $boardingHouseRepository;
         $this->transactionRepository = $transactionRepository;
     }
@@ -25,7 +25,6 @@ class BookingController extends Controller
     public function booking(Request $request, $slug)
     {
         $this->transactionRepository->saveTransactionDataToSession($request->all());
-
         return redirect()->route('booking.information', $slug);
     }
 
@@ -33,66 +32,64 @@ class BookingController extends Controller
     {
         $boardingHouse = $this->boardingHouseRepository->getBoardingHouseBySlug($slug);
         $transaction = $this->transactionRepository->getTransactionDataFromSession();
+        
+        if (!$transaction) return redirect()->route('home');
+
         $room = $this->boardingHouseRepository->getBoardingHouseRoomById($transaction['room_id']);
-
         return view('pages.booking.information', compact('boardingHouse', 'transaction', 'room'));
-
     }
 
     public function saveInformation(CustomerInformationStoreRequest $request, $slug)
     {
         $data = $request->validated();
-
         $this->transactionRepository->saveTransactionDataToSession($data);
-
         return redirect()->route('booking.checkout', $slug);
     }
 
     public function checkout($slug)
-{
-    $boardingHouse = $this->boardingHouseRepository->getBoardingHouseBySlug($slug);
-    $transaction = $this->transactionRepository->getTransactionDataFromSession();
+    {
+        $boardingHouse = $this->boardingHouseRepository->getBoardingHouseBySlug($slug);
+        $transaction = $this->transactionRepository->getTransactionDataFromSession();
 
-    // Validasi: Jika session kosong atau tidak ada room_id, balikkan ke halaman detail/awal
-    if (!$transaction || !isset($transaction['room_id'])) {
-        return redirect()->route('boarding-house.show', $slug)
-                         ->with('error', 'Silakan pilih kamar terlebih dahulu.');
+        if (!$transaction) return redirect()->route('home');
+
+        $room = $this->boardingHouseRepository->getBoardingHouseRoomById($transaction['room_id']);
+        return view('pages.booking.checkout', compact('boardingHouse', 'transaction', 'room'));
     }
 
-    $room = $this->boardingHouseRepository->getBoardingHouseRoomById($transaction['room_id']);
+    // PERBAIKAN: Menambahkan parameter $slug agar tidak 404
+    public function payment(Request $request, $slug)
+    {
+        $this->transactionRepository->saveTransactionDataToSession($request->all());
+        $transaction = $this->transactionRepository->saveTransaction($this->transactionRepository->getTransactionDataFromSession());
 
-    return view('pages.booking.checkout', compact('boardingHouse', 'transaction', 'room'));
-}
+        // Konfigurasi Midtrans
+        \Midtrans\Config::$serverKey = config('midtrans.server_key');
+        \Midtrans\Config::$isProduction = config('midtrans.is_production');
+        \Midtrans\Config::$isSanitized = config('midtrans.is_sanitized');
+        \Midtrans\Config::$is3ds = config('midtrans.is_3ds');
 
-   public function payment(Request $request, $slug)
-{
-    // 1. Ambil data transaksi yang sebelumnya disimpan di session saat isi form checkout
-    $transactionData = session()->get('transaction');
+        $params = [
+            'transaction_details' => [
+                'order_id' => $transaction->code,
+                'gross_amount' => $transaction->total_amount,
+            ],
+            'customer_details' => [
+                'first_name' => $transaction->name,
+                'email' => $transaction->email,
+                'phone' => $transaction->phone_number,
+            ],
+        ];
 
-    if (!$transactionData) {
-        return redirect()->route('booking.index')->with('error', 'Session expired');
+        $paymentUrl = \Midtrans\Snap::createTransaction($params)->redirect_url;
+        return redirect($paymentUrl);
     }
-
-    // 2. Gabungkan data session dengan data pilihan pembayaran dari form (down_payment/full_payment)
-    $data = array_merge($transactionData, [
-        'payment_method' => $request->payment_method,
-    ]);
-
-    // 3. Panggil repository
-    $transaction = $this->transactionRepository->saveTransaction($data);
-
-    // ... lanjut ke proses Midtrans
-}
 
     public function success(Request $request)
     {
        $transaction = $this->transactionRepository->getTransactionByCode($request->order_id);
-
-       if (!$transaction) {
-           return redirect()->route('home');
-       }
-
-        return view('pages.booking.success', compact('transaction'));
+       if (!$transaction) return redirect()->route('home');
+       return view('pages.booking.success', compact('transaction'));
     }
 
     public function check()
@@ -103,13 +100,11 @@ class BookingController extends Controller
     public function show(BookingShowRequest $request)
     {
         $transaction = $this->transactionRepository->getTransactionByCodeEmailPhone(
-            $request->code,
-            $request->email,
-            $request->phone_number
+            $request->code, $request->email, $request->phone_number
         );
 
         if (!$transaction) {
-            return redirect()->back()->with(['error', 'Data transaksi tidak ditemukan.']);
+            return redirect()->back()->with('error', 'Data transaksi tidak ditemukan.');
         }
 
         return view('pages.booking.detail', compact('transaction'));
